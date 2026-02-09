@@ -1,135 +1,90 @@
 from fastapi import FastAPI, Query
 import requests
-from database import get_db
+
+from database import (
+    get_or_create_city,
+    get_or_create_location,
+    get_or_create_sensor,
+    insert_measurement
+)
 
 app = FastAPI()
 
 BASE_URL = "https://api.openaq.org/v3"
-API_KEY = "YOUR_API_KEY"
+API_KEY = "ed7c82477911ee7eba20b6ac4f8647878331e877c3efdbff59db123027b84d61"
 
 HEADERS = {
-    "X-API-Key": API_KEY,
-    "Content-Type": "application/json"
+    "X-API-Key": API_KEY
 }
 
 @app.get("/airquality")
 def fetch_air_quality(city: str = Query(...)):
 
-    db = get_db()
-    cursor = db.cursor()
-
-    # =========================
-    # 1️⃣ FETCH LOCATIONS
-    # =========================
-    locations_resp = requests.get(
+    resp = requests.get(
         f"{BASE_URL}/locations",
         headers=HEADERS,
-        params={"city": city, "limit": 5}
+        params={"city": city, "limit": 5},
+        timeout=10
     ).json()
 
-    if not locations_resp.get("results"):
+    if not resp.get("results"):
         return {"error": "City not found"}
 
-    country_code = locations_resp["results"][0]["country"]
+    country_field = resp["results"][0].get("country")
 
-    # =========================
-    # 2️⃣ COUNTRY
-    # =========================
-    cursor.execute(
-        "SELECT country_code FROM countries WHERE country_code=%s",
-        (country_code,)
-    )
-
-    if not cursor.fetchone():
-        cursor.execute(
-            "INSERT INTO countries (country_code) VALUES (%s)",
-            (country_code,)
-        )
-        db.commit()
-
-    # =========================
-    # 3️⃣ CITY
-    # =========================
-    cursor.execute(
-        "SELECT city_id FROM cities WHERE city_name=%s",
-        (city,)
-    )
-    row = cursor.fetchone()
-
-    if row:
-        city_id = row[0]
+    if isinstance(country_field, dict):
+        country_code = country_field.get("code")
     else:
-        cursor.execute(
-            "INSERT INTO cities (city_name, country_code) VALUES (%s, %s)",
-            (city, country_code)
-        )
-        db.commit()
-        city_id = cursor.lastrowid
+        country_code = country_field
 
-    # =========================
-    # 4️⃣ LOCATIONS
-    # =========================
-    for loc in locations_resp["results"]:
+    city_id = get_or_create_city(city, country_code)
+
+    for loc in resp["results"][:2]:
         location_id = loc["id"]
         location_name = loc["name"]
 
-        cursor.execute(
-            "SELECT location_id FROM locations WHERE location_id=%s",
-            (location_id,)
-        )
+        get_or_create_location(location_id, location_name, city_id)
 
-        if not cursor.fetchone():
-            cursor.execute(
-                "INSERT INTO locations (location_id, location_name, city_id) VALUES (%s, %s, %s)",
-                (location_id, location_name, city_id)
-            )
-            db.commit()
-
-        # =========================
-        # 5️⃣ SENSORS
-        # =========================
-        for sensor in loc.get("sensors", []):
+        for sensor in loc.get("sensors", [])[:2]:
             sensor_id = sensor["id"]
             parameter = sensor["parameter"]["name"]
 
-            cursor.execute(
-                "SELECT sensor_id FROM sensors WHERE sensor_id=%s",
-                (sensor_id,)
-            )
+            get_or_create_sensor(sensor_id, parameter, location_id)
 
-            if not cursor.fetchone():
-                cursor.execute(
-                    "INSERT INTO sensors (sensor_id, parameter, location_id) VALUES (%s, %s, %s)",
-                    (sensor_id, parameter, location_id)
-                )
-                db.commit()
-
-            # =========================
-            # 6️⃣ MEASUREMENTS
-            # =========================
-            meas = requests.get(
+            meas_resp = requests.get(
                 f"{BASE_URL}/sensors/{sensor_id}/measurements",
                 headers=HEADERS,
-                params={"limit": 1}
+                params={"limit": 1},
+                timeout=10
             ).json()
 
-            if not meas.get("results"):
+            if not meas_resp.get("results"):
                 continue
 
-            m = meas["results"][0]
+            m = meas_resp["results"][0]
 
-            cursor.execute(
-                """
-                INSERT INTO measurements (sensor_id, value, unit, measured_at)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (
-                    sensor_id,
-                    m["value"],
-                    m["parameter"]["units"],
-                    m["period"]["datetimeFrom"]["utc"]
-                )
+            insert_measurement(
+                sensor_id=sensor_id,
+                value=m["value"],
+                unit=m["parameter"]["units"],
+                measured_at=m["period"]["datetimeFrom"]["utc"]
             )
-            db.commit()
 
     return {"status": "Data fetched and saved"}
+
+
+@app.get("/airquality")
+def get_air_quality(city: str):
+
+    get_latest_measurements_for_city = ["results"][0].get("city")
+    """
+    Returns latest measurements for a city
+    """
+    return get_latest_measurements_for_city(city)
+
+
+@app.post("/ingest/airquality")
+def ingest_air_quality(city: str = Query(...)):
+    ...
+
+
